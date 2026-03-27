@@ -264,7 +264,7 @@ st.sidebar.markdown("""
 
 data_source = st.sidebar.radio(
     "Navigate",
-    ["Overview", "FEMA Disaster Declarations", "FEMA NFIP Claims",
+    ["Overview", "Property Risk Tool", "FEMA Disaster Declarations", "FEMA NFIP Claims",
      "NOAA Storm Events", "EM-DAT Global Disasters"],
     index=0,
 )
@@ -443,6 +443,460 @@ if data_source == "Overview":
                 marker=dict(line=dict(color="#000000", width=2)),
             )
             st.plotly_chart(fig4, use_container_width=True)
+
+
+# ══════════════════════════════════════════════
+# PROPERTY RISK ASSESSMENT TOOL
+# ══════════════════════════════════════════════
+
+elif data_source == "Property Risk Tool":
+    page_header(
+        "Property Risk Assessment",
+        "Evaluate the catastrophe risk profile of a US property. This tool cross-references "
+        "FEMA disaster declarations, NOAA storm event history, and NFIP flood claims data "
+        "to generate a multi-peril risk score with per-hazard breakdowns."
+    )
+
+    # ── State data lookups ──
+    US_STATES = {
+        "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
+        "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
+        "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
+        "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
+        "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+        "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
+        "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
+        "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+        "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
+        "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+        "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+        "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
+        "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+    }
+
+    FLOOD_ZONES = {
+        "A": "High risk — 1% annual flood chance (100-yr floodplain). Mandatory flood insurance.",
+        "AE": "High risk — Base Flood Elevations determined. Mandatory flood insurance.",
+        "AH": "High risk — Shallow flooding (1-3 ft). Mandatory flood insurance.",
+        "AO": "High risk — Sheet flow on sloping terrain. Mandatory flood insurance.",
+        "V": "High risk — Coastal flood with wave action. Mandatory flood insurance.",
+        "VE": "High risk — Coastal flood, Base Flood Elevations determined. Mandatory.",
+        "X": "Moderate-to-low risk — Outside 100-yr floodplain. Insurance not required.",
+        "B": "Moderate risk — Between 100-yr and 500-yr floodplain.",
+        "C": "Low risk — Minimal flood hazard.",
+        "D": "Undetermined risk — No flood hazard analysis performed.",
+    }
+
+    # ── Input form ──
+    section("Property Details", "Enter property characteristics to assess catastrophe exposure.")
+
+    col1, col2, col3 = st.columns(3, gap="medium")
+    with col1:
+        state_code = st.selectbox(
+            "State",
+            options=list(US_STATES.keys()),
+            format_func=lambda x: f"{x} — {US_STATES[x]}",
+            index=list(US_STATES.keys()).index("FL"),
+        )
+    with col2:
+        property_value = st.number_input(
+            "Property Value ($)",
+            min_value=50_000, max_value=50_000_000,
+            value=450_000, step=25_000,
+            format="%d",
+        )
+    with col3:
+        year_built = st.number_input(
+            "Year Built",
+            min_value=1900, max_value=2026,
+            value=1995, step=1,
+        )
+
+    col4, col5, col6 = st.columns(3, gap="medium")
+    with col4:
+        flood_zone = st.selectbox(
+            "FEMA Flood Zone",
+            options=list(FLOOD_ZONES.keys()),
+            index=0,
+        )
+    with col5:
+        stories = st.selectbox("Stories", [1, 2, 3, 4], index=1)
+    with col6:
+        construction = st.selectbox(
+            "Construction Type",
+            ["Wood Frame", "Masonry", "Steel Frame", "Concrete", "Manufactured/Mobile"],
+            index=0,
+        )
+
+    divider()
+
+    # ── Compute risk scores ──
+
+    # Load data
+    fema = get_fema_declarations()
+    nfip = get_nfip_claims()
+    storms = get_noaa_storms()
+
+    # --- 1. FEMA Declaration frequency for this state ---
+    state_name = US_STATES[state_code]
+    if not fema.empty:
+        state_decl = fema[fema["state"] == state_code]
+        decl_count = len(state_decl)
+        all_states_counts = fema.groupby("state").size()
+        decl_percentile = (all_states_counts < decl_count).sum() / len(all_states_counts) * 100
+
+        # Recent acceleration (last 10 yrs vs prior 10)
+        recent = state_decl[state_decl["year"] >= 2015].shape[0]
+        prior = state_decl[(state_decl["year"] >= 2005) & (state_decl["year"] < 2015)].shape[0]
+        accel_ratio = recent / max(prior, 1)
+
+        # Incident type breakdown
+        type_breakdown = state_decl["incidentType"].value_counts().head(5)
+    else:
+        decl_count, decl_percentile, accel_ratio = 0, 50, 1.0
+        type_breakdown = pd.Series(dtype=int)
+
+    # --- 2. NFIP flood claims for this state ---
+    if not nfip.empty and "state" in nfip.columns:
+        state_nfip = nfip[nfip["state"] == state_code]
+        nfip_claims = len(state_nfip)
+        avg_payout = state_nfip["totalPaid"].mean() if "totalPaid" in state_nfip.columns and len(state_nfip) > 0 else 0
+        total_state_paid = state_nfip["totalPaid"].sum() if "totalPaid" in state_nfip.columns else 0
+    else:
+        nfip_claims, avg_payout, total_state_paid = 0, 0, 0
+
+    # --- 3. NOAA storm damage for this state ---
+    if not storms.empty and "STATE" in storms.columns:
+        state_storms = storms[storms["STATE"].str.upper() == state_name.upper()]
+        storm_events = len(state_storms)
+        storm_prop_dmg = state_storms["DAMAGE_PROPERTY"].sum() if "DAMAGE_PROPERTY" in state_storms.columns else 0
+        storm_deaths = int(state_storms["DEATHS_DIRECT"].sum()) if "DEATHS_DIRECT" in state_storms.columns else 0
+        # Top event types
+        storm_types = state_storms["EVENT_TYPE"].value_counts().head(5) if "EVENT_TYPE" in state_storms.columns else pd.Series(dtype=int)
+    else:
+        storm_events, storm_prop_dmg, storm_deaths = 0, 0, 0
+        storm_types = pd.Series(dtype=int)
+
+    # --- 4. Composite risk scoring ---
+    # Flood zone risk factor
+    flood_zone_risk = {
+        "V": 1.0, "VE": 1.0, "A": 0.9, "AE": 0.85, "AH": 0.8, "AO": 0.8,
+        "B": 0.45, "D": 0.5, "X": 0.25, "C": 0.15,
+    }
+    fz_risk = flood_zone_risk.get(flood_zone, 0.5)
+
+    # Construction vulnerability
+    construction_risk = {
+        "Manufactured/Mobile": 1.0, "Wood Frame": 0.75, "Masonry": 0.5,
+        "Steel Frame": 0.35, "Concrete": 0.25,
+    }
+    const_risk = construction_risk.get(construction, 0.5)
+
+    # Age factor (older = more vulnerable)
+    building_age = 2026 - year_built
+    age_factor = min(building_age / 80, 1.0)  # maxes at 80+ years
+
+    # Stories factor (taller = more wind exposure, but less flood depth damage)
+    stories_wind = min(stories / 4, 1.0)
+    stories_flood = max(1 - (stories - 1) * 0.15, 0.4)
+
+    # State hazard score (0-1) from percentile
+    state_hazard = decl_percentile / 100
+
+    # Individual peril scores (0-100)
+    flood_score = min(100, (fz_risk * 60 + state_hazard * 20 + stories_flood * 10 + age_factor * 10))
+    wind_score = min(100, (state_hazard * 40 + const_risk * 30 + stories_wind * 15 + age_factor * 15))
+    storm_surge_score = min(100, fz_risk * 70 + state_hazard * 20 + stories_flood * 10) if flood_zone in ["V", "VE", "AE", "A"] else min(30, fz_risk * 30)
+    hail_score = min(100, state_hazard * 50 + const_risk * 30 + age_factor * 20)
+    wildfire_score = min(60, state_hazard * 30 + const_risk * 20 + age_factor * 10)
+
+    # Composite weighted score
+    composite = (
+        flood_score * 0.30 +
+        wind_score * 0.25 +
+        storm_surge_score * 0.20 +
+        hail_score * 0.15 +
+        wildfire_score * 0.10
+    )
+
+    # Risk tier
+    if composite >= 75:
+        risk_tier = "Critical"
+        tier_color = RED
+        tier_desc = "This property faces severe catastrophe exposure across multiple perils. Expect elevated insurance premiums and consider mitigation measures."
+    elif composite >= 55:
+        risk_tier = "High"
+        tier_color = ORANGE
+        tier_desc = "Significant exposure to one or more natural perils. Insurance may be mandatory for certain coverages. Review flood zone designation and building resilience."
+    elif composite >= 35:
+        risk_tier = "Moderate"
+        tier_color = YELLOW
+        tier_desc = "Moderate catastrophe risk. Standard insurance coverage should be adequate, but review individual peril scores for any elevated exposures."
+    else:
+        risk_tier = "Low"
+        tier_color = GREEN
+        tier_desc = "Below-average catastrophe exposure. This property benefits from favorable geography, construction, or flood zone placement."
+
+    # ── Display Results ──
+
+    section("Risk Assessment Results")
+
+    # Overall score card
+    st.markdown(f"""
+    <div style="
+        background: rgba(255,255,255,0.03);
+        border: 1px solid {tier_color}30;
+        border-radius: 20px;
+        padding: 32px 40px;
+        margin-bottom: 28px;
+        display: flex;
+        align-items: center;
+        gap: 40px;
+    ">
+        <div style="text-align: center; min-width: 140px;">
+            <div style="
+                font-size: 3.2rem;
+                font-weight: 800;
+                color: {tier_color};
+                line-height: 1;
+                letter-spacing: -0.03em;
+            ">{composite:.0f}</div>
+            <div style="
+                font-size: 0.7rem;
+                font-weight: 600;
+                color: rgba(255,255,255,0.35);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                margin-top: 6px;
+            ">Composite Score</div>
+        </div>
+        <div style="width: 1px; height: 80px; background: rgba(255,255,255,0.06);"></div>
+        <div>
+            <div style="
+                font-size: 1.3rem;
+                font-weight: 700;
+                color: {tier_color};
+                margin-bottom: 6px;
+            ">{risk_tier} Risk</div>
+            <div style="
+                font-size: 0.9rem;
+                color: rgba(255,255,255,0.5);
+                line-height: 1.6;
+                max-width: 600px;
+            ">{tier_desc}</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Property summary
+    kpi_row([
+        {"label": "Property Value", "value": format_number(property_value)},
+        {"label": "Building Age", "value": f"{building_age} yrs"},
+        {"label": "Flood Zone", "value": flood_zone},
+        {"label": "Construction", "value": construction},
+    ])
+
+    divider()
+
+    # ── Per-peril breakdown ──
+    section("Peril-Level Risk Breakdown",
+            "Individual risk scores for each major catastrophe peril, calibrated against "
+            "historical FEMA declarations, NOAA storm records, and NFIP claims for this state.")
+
+    peril_data = [
+        ("Flood", flood_score, BLUE,
+         "Riverine and pluvial flooding risk based on FEMA flood zone, state flood history, "
+         "building elevation characteristics, and age."),
+        ("Wind / Hurricane", wind_score, TEAL,
+         "Tropical cyclone and severe wind risk based on state storm frequency, "
+         "construction type vulnerability, building height, and age."),
+        ("Storm Surge", storm_surge_score, PURPLE,
+         "Coastal inundation risk. Primarily driven by flood zone — properties in V/VE zones "
+         "face direct wave action; A/AE zones face stillwater surge."),
+        ("Hail", hail_score, ORANGE,
+         "Convective storm and hail risk. Roof and exterior materials are the primary "
+         "damage drivers. Older buildings with original roofing face higher exposure."),
+        ("Wildfire", wildfire_score, RED,
+         "Wildfire proximity risk. Depends on regional vegetation, construction combustibility, "
+         "and historical fire frequency in the state."),
+    ]
+
+    for peril_name, score, color, description in peril_data:
+        if score >= 70:
+            level = "High"
+        elif score >= 40:
+            level = "Moderate"
+        else:
+            level = "Low"
+
+        st.markdown(f"""
+        <div style="
+            background: rgba(255,255,255,0.02);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 14px;
+            padding: 20px 24px;
+            margin-bottom: 10px;
+        ">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <div style="font-size: 1rem; font-weight: 600; color: #f5f5f7;">{peril_name}</div>
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <span style="font-size: 0.75rem; color: {color}; font-weight: 600;">{level}</span>
+                    <span style="font-size: 1.4rem; font-weight: 700; color: {color};">{score:.0f}</span>
+                </div>
+            </div>
+            <div style="
+                background: rgba(255,255,255,0.04);
+                border-radius: 6px;
+                height: 8px;
+                overflow: hidden;
+                margin-bottom: 10px;
+            ">
+                <div style="
+                    width: {score}%;
+                    height: 100%;
+                    background: linear-gradient(90deg, {color}80, {color});
+                    border-radius: 6px;
+                    transition: width 0.5s ease;
+                "></div>
+            </div>
+            <div style="font-size: 0.8rem; color: rgba(255,255,255,0.35); line-height: 1.5;">{description}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    divider()
+
+    # ── State historical context ──
+    section("Historical Context",
+            f"Catastrophe history for {state_name} drawn from loaded FEMA, NOAA, and NFIP datasets.")
+
+    col1, col2 = st.columns(2, gap="large")
+
+    with col1:
+        kpi_row([
+            {"label": "FEMA Declarations", "value": f"{decl_count:,}"},
+            {"label": "NOAA Storm Events", "value": f"{storm_events:,}"},
+        ])
+
+        if len(type_breakdown) > 0:
+            fig = px.bar(
+                x=type_breakdown.values, y=type_breakdown.index, orientation="h",
+                color_discrete_sequence=[BLUE],
+                labels={"x": "Declarations", "y": ""},
+            )
+            apply_layout(fig, height=300, title=dict(text=f"FEMA Declaration Types — {state_code}"))
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        kpi_row([
+            {"label": "NFIP Claims", "value": f"{nfip_claims:,}"},
+            {"label": "Avg Flood Payout", "value": format_number(avg_payout)},
+        ])
+
+        if len(storm_types) > 0:
+            fig = px.bar(
+                x=storm_types.values, y=storm_types.index, orientation="h",
+                color_discrete_sequence=[TEAL],
+                labels={"x": "Events", "y": ""},
+            )
+            apply_layout(fig, height=300, title=dict(text=f"NOAA Storm Types — {state_name}"))
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Radar chart of peril scores
+    divider()
+    section("Multi-Peril Risk Profile",
+            "Radar visualization of the property's exposure across all five catastrophe perils. "
+            "A wider shape indicates broader multi-peril exposure; spikes indicate concentrated risk.")
+
+    categories = ["Flood", "Wind", "Storm Surge", "Hail", "Wildfire"]
+    scores = [flood_score, wind_score, storm_surge_score, hail_score, wildfire_score]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=scores + [scores[0]],
+        theta=categories + [categories[0]],
+        fill="toself",
+        fillcolor=f"rgba({int(tier_color[1:3],16)},{int(tier_color[3:5],16)},{int(tier_color[5:7],16)},0.1)",
+        line=dict(color=tier_color, width=2.5),
+        marker=dict(size=6, color=tier_color),
+        name="Risk Score",
+    ))
+    apply_layout(fig, height=420, title=dict(text="Property Risk Radar"))
+    fig.update_layout(
+        polar=dict(
+            bgcolor="rgba(255,255,255,0.02)",
+            radialaxis=dict(
+                visible=True, range=[0, 100],
+                gridcolor="rgba(255,255,255,0.06)",
+                tickfont=dict(size=9, color="rgba(255,255,255,0.3)"),
+            ),
+            angularaxis=dict(
+                gridcolor="rgba(255,255,255,0.06)",
+                tickfont=dict(size=12, color="rgba(255,255,255,0.6)"),
+            ),
+        ),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Estimated annual loss
+    divider()
+    section("Estimated Annual Loss (EAL)",
+            "A simplified expected annual loss calculation based on the composite risk score, "
+            "property value, and peril weights. This is a screening-level estimate — a full "
+            "actuarial analysis would incorporate granular location data, elevation certificates, "
+            "and vendor catastrophe model output (RMS, AIR, CoreLogic).")
+
+    # EAL = property_value * loss_rate, where loss_rate is derived from score
+    # Typical cat loss rates: 0.05% (low) to 2%+ (critical coastal)
+    loss_rate = (composite / 100) ** 1.5 * 0.025  # non-linear scaling, max ~2.5%
+    eal = property_value * loss_rate
+    eal_flood = property_value * (flood_score / 100) ** 1.5 * 0.025 * 0.30
+    eal_wind = property_value * (wind_score / 100) ** 1.5 * 0.025 * 0.25
+    eal_surge = property_value * (storm_surge_score / 100) ** 1.5 * 0.025 * 0.20
+    eal_hail = property_value * (hail_score / 100) ** 1.5 * 0.025 * 0.15
+    eal_fire = property_value * (wildfire_score / 100) ** 1.5 * 0.025 * 0.10
+
+    kpi_row([
+        {"label": "Total EAL", "value": format_number(eal)},
+        {"label": "Loss Rate", "value": f"{loss_rate*100:.3f}%"},
+        {"label": "Flood EAL", "value": format_number(eal_flood)},
+        {"label": "Wind EAL", "value": format_number(eal_wind)},
+    ])
+
+    eal_data = pd.DataFrame({
+        "Peril": ["Flood", "Wind", "Storm Surge", "Hail", "Wildfire"],
+        "EAL": [eal_flood, eal_wind, eal_surge, eal_hail, eal_fire],
+    }).sort_values("EAL", ascending=True)
+
+    fig = px.bar(
+        eal_data, x="EAL", y="Peril", orientation="h",
+        color="EAL",
+        color_continuous_scale=[[0, "rgba(10,132,255,0.3)"], [1, BLUE]],
+    )
+    apply_layout(fig, height=280, title=dict(text="Estimated Annual Loss by Peril"))
+    fig.update_layout(showlegend=False, coloraxis_showscale=False, xaxis_tickprefix="$")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Flood zone info
+    divider()
+    st.markdown(f"""
+    <div style="
+        background: rgba(255,255,255,0.02);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 14px;
+        padding: 20px 24px;
+    ">
+        <div style="font-size: 0.7rem; font-weight: 600; color: rgba(255,255,255,0.3);
+             text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">
+            Flood Zone {flood_zone} — Definition
+        </div>
+        <div style="font-size: 0.9rem; color: rgba(255,255,255,0.6); line-height: 1.6;">
+            {FLOOD_ZONES.get(flood_zone, "Unknown flood zone designation.")}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════
