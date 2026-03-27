@@ -74,14 +74,15 @@ def fetch_fema_nfip_claims(limit: int = 50000) -> pd.DataFrame:
     if _is_cached(cache_name):
         return _load_cache(cache_name)
 
-    url = "https://www.fema.gov/api/open/v1/FimaNfipClaims"
+    url = "https://www.fema.gov/api/open/v2/FimaNfipClaims"
     params = {
         "$top": limit,
         "$orderby": "dateOfLoss desc",
-        "$select": "dateOfLoss,state,countyCode,totalBuildingInsuranceCoverage,"
-                   "totalContentsInsuranceCoverage,amountPaidOnBuildingClaim,"
-                   "amountPaidOnContentsClaim,yearOfLoss,floodZone,"
-                   "originalConstructionDate,occupancyType",
+        "$select": "dateOfLoss,yearOfLoss,occupancyType,"
+                   "totalBuildingInsuranceCoverage,totalContentsInsuranceCoverage,"
+                   "amountPaidOnBuildingClaim,amountPaidOnContentsClaim,"
+                   "netBuildingPaymentAmount,netContentsPaymentAmount,"
+                   "ratedFloodZone,state,countyCode,originalConstructionDate",
     }
     resp = requests.get(url, params=params, timeout=120)
     resp.raise_for_status()
@@ -91,12 +92,25 @@ def fetch_fema_nfip_claims(limit: int = 50000) -> pd.DataFrame:
     if not df.empty:
         if "dateOfLoss" in df.columns:
             df["dateOfLoss"] = pd.to_datetime(df["dateOfLoss"], errors="coerce", utc=True)
-        for col in ["amountPaidOnBuildingClaim", "amountPaidOnContentsClaim",
-                     "totalBuildingInsuranceCoverage", "totalContentsInsuranceCoverage"]:
+        num_cols = ["amountPaidOnBuildingClaim", "amountPaidOnContentsClaim",
+                    "netBuildingPaymentAmount", "netContentsPaymentAmount",
+                    "totalBuildingInsuranceCoverage", "totalContentsInsuranceCoverage"]
+        for col in num_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["totalPaid"] = df.get("amountPaidOnBuildingClaim", 0).fillna(0) + \
-                          df.get("amountPaidOnContentsClaim", 0).fillna(0)
+
+        # Compute total paid — prefer net payment fields, fall back to amountPaid
+        bldg = df.get("netBuildingPaymentAmount", df.get("amountPaidOnBuildingClaim", 0))
+        cont = df.get("netContentsPaymentAmount", df.get("amountPaidOnContentsClaim", 0))
+        if isinstance(bldg, int):
+            bldg = pd.Series(0, index=df.index)
+        if isinstance(cont, int):
+            cont = pd.Series(0, index=df.index)
+        df["totalPaid"] = bldg.fillna(0) + cont.fillna(0)
+
+        # Normalize flood zone column name
+        if "ratedFloodZone" in df.columns and "floodZone" not in df.columns:
+            df["floodZone"] = df["ratedFloodZone"]
 
     _save_cache(cache_name, df)
     return df
