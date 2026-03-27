@@ -898,6 +898,269 @@ elif data_source == "Property Risk Tool":
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Premium Estimation ──
+    divider()
+    section("Estimated Insurance Premium",
+            "Indicative annual premium estimates for each coverage line, built from the "
+            "risk scores above. Pricing follows standard actuarial logic: "
+            "Premium = Expected Loss + Expense Load + Profit Margin + Reinsurance Cost. "
+            "These are screening-level estimates — actual quoted premiums depend on carrier "
+            "appetite, credit score, claims history, deductible selection, and policy limits.")
+
+    # --- Pricing model ---
+    # Base rates per $1K of coverage (industry benchmarks, varies by peril)
+    # These reflect typical US cat-exposed rate-on-line ranges
+
+    # Deductible selection
+    col_d1, col_d2, col_d3 = st.columns(3, gap="medium")
+    with col_d1:
+        deductible = st.selectbox(
+            "Deductible",
+            ["$1,000", "$2,500", "$5,000", "$10,000", "$25,000"],
+            index=1,
+        )
+    with col_d2:
+        coverage_pct = st.slider("Coverage Limit (% of value)", 50, 100, 100, 5)
+    with col_d3:
+        contents_value = st.number_input(
+            "Contents Value ($)", min_value=0, max_value=5_000_000,
+            value=int(property_value * 0.4), step=10_000, format="%d",
+        )
+
+    deductible_val = int(deductible.replace("$", "").replace(",", ""))
+    coverage_limit = property_value * coverage_pct / 100
+    total_insured = coverage_limit + contents_value
+
+    # Deductible credit (higher deductible = lower premium)
+    deductible_factor = {1000: 1.0, 2500: 0.85, 5000: 0.72, 10000: 0.58, 25000: 0.42}
+    ded_credit = deductible_factor.get(deductible_val, 0.85)
+
+    # Expense ratio (typical: 28-35% of premium for admin, commission, taxes)
+    expense_ratio = 0.30
+    # Profit & contingency load
+    profit_margin = 0.05
+    # Reinsurance cost load (higher for cat-exposed)
+    reins_load = 0.03 + (composite / 100) * 0.07  # 3-10% depending on risk
+
+    # Per-peril pure premium (EAL adjusted for deductible)
+    def peril_premium(score, weight, peril_name):
+        """Calculate premium for a single peril."""
+        # Pure loss rate (non-linear from score)
+        pure_rate = (score / 100) ** 1.5 * 0.025 * weight
+        pure_loss = total_insured * pure_rate * ded_credit
+
+        # Load for expenses, profit, reinsurance
+        gross = pure_loss / (1 - expense_ratio - profit_margin - reins_load)
+        return max(gross, 0)
+
+    prem_flood = peril_premium(flood_score, 0.30, "Flood")
+    prem_wind = peril_premium(wind_score, 0.25, "Wind")
+    prem_surge = peril_premium(storm_surge_score, 0.20, "Storm Surge")
+    prem_hail = peril_premium(hail_score, 0.15, "Hail")
+    prem_fire = peril_premium(wildfire_score, 0.10, "Wildfire")
+
+    # NFIP flood premium (separate, based on FEMA Risk Rating 2.0 logic)
+    # Base: flood zone drives primary rate, adjusted for building characteristics
+    nfip_base_rates = {
+        "V": 12.50, "VE": 12.50, "A": 8.00, "AE": 7.50, "AH": 6.50, "AO": 6.50,
+        "B": 2.80, "D": 3.50, "X": 1.20, "C": 0.80,
+    }
+    nfip_rate = nfip_base_rates.get(flood_zone, 3.0)  # per $1K
+    nfip_age_surcharge = 1.0 + min(building_age, 50) * 0.008  # up to 40% for old buildings
+    nfip_stories_credit = 1.0 - (stories - 1) * 0.05  # multi-story slight credit
+    nfip_premium = (coverage_limit / 1000) * nfip_rate * nfip_age_surcharge * nfip_stories_credit * ded_credit
+    nfip_premium = max(nfip_premium, 300)  # NFIP minimum ~$300/yr
+
+    # Homeowner's / wind premium (HO-3 style)
+    ho_base_rate = 3.50 + (composite / 100) * 8.0  # $3.50-$11.50 per $1K
+    ho_const_factor = {"Wood Frame": 1.0, "Masonry": 0.85, "Steel Frame": 0.75,
+                       "Concrete": 0.70, "Manufactured/Mobile": 1.35}
+    ho_premium = (coverage_limit / 1000) * ho_base_rate * ho_const_factor.get(construction, 1.0) * ded_credit
+    ho_premium = max(ho_premium, 500)
+
+    # Contents premium
+    contents_rate = 1.50 + (composite / 100) * 3.0
+    contents_premium = (contents_value / 1000) * contents_rate * ded_credit if contents_value > 0 else 0
+
+    # Total annual premium
+    total_premium = nfip_premium + ho_premium + contents_premium
+
+    # Cat-only premium (peril sum)
+    cat_premium = prem_flood + prem_wind + prem_surge + prem_hail + prem_fire
+
+    st.markdown("")  # spacing
+
+    # Premium result cards
+    st.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, rgba(10,132,255,0.06) 0%, rgba(191,90,242,0.06) 100%);
+        border: 1px solid rgba(10,132,255,0.15);
+        border-radius: 20px;
+        padding: 32px 40px;
+        margin-bottom: 24px;
+    ">
+        <div style="display: flex; align-items: flex-end; gap: 16px; margin-bottom: 20px;">
+            <div style="font-size: 2.6rem; font-weight: 800; color: #f5f5f7;
+                 letter-spacing: -0.03em; line-height: 1;">{format_number(total_premium)}</div>
+            <div style="font-size: 1rem; color: rgba(255,255,255,0.4); padding-bottom: 4px;">/ year estimated total</div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;">
+            <div>
+                <div style="font-size: 0.68rem; font-weight: 600; color: {BLUE};
+                     text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
+                    Flood (NFIP)</div>
+                <div style="font-size: 1.4rem; font-weight: 700; color: #f5f5f7;">
+                    {format_number(nfip_premium)}</div>
+                <div style="font-size: 0.75rem; color: rgba(255,255,255,0.3);">
+                    ${nfip_premium/max(coverage_limit/1000,1):.2f} per $1K coverage</div>
+            </div>
+            <div>
+                <div style="font-size: 0.68rem; font-weight: 600; color: {TEAL};
+                     text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
+                    Homeowner / Wind</div>
+                <div style="font-size: 1.4rem; font-weight: 700; color: #f5f5f7;">
+                    {format_number(ho_premium)}</div>
+                <div style="font-size: 0.75rem; color: rgba(255,255,255,0.3);">
+                    ${ho_premium/max(coverage_limit/1000,1):.2f} per $1K coverage</div>
+            </div>
+            <div>
+                <div style="font-size: 0.68rem; font-weight: 600; color: {GREEN};
+                     text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px;">
+                    Contents</div>
+                <div style="font-size: 1.4rem; font-weight: 700; color: #f5f5f7;">
+                    {format_number(contents_premium)}</div>
+                <div style="font-size: 0.75rem; color: rgba(255,255,255,0.3);">
+                    ${contents_premium/max(contents_value/1000,1):.2f} per $1K coverage</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Premium breakdown chart
+    col_p1, col_p2 = st.columns(2, gap="large")
+
+    with col_p1:
+        prem_breakdown = pd.DataFrame({
+            "Coverage": ["Flood (NFIP)", "Homeowner / Wind", "Contents"],
+            "Premium": [nfip_premium, ho_premium, contents_premium],
+        })
+        fig = px.pie(
+            prem_breakdown, names="Coverage", values="Premium",
+            color_discrete_sequence=[BLUE, TEAL, GREEN],
+            hole=0.55,
+        )
+        apply_layout(fig, height=350, title=dict(text="Premium Allocation"))
+        fig.update_traces(
+            textinfo="percent+label", textfont_size=11,
+            marker=dict(line=dict(color="#000000", width=2)),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_p2:
+        # Cat peril premium breakdown
+        cat_data = pd.DataFrame({
+            "Peril": ["Flood", "Wind", "Storm Surge", "Hail", "Wildfire"],
+            "Premium": [prem_flood, prem_wind, prem_surge, prem_hail, prem_fire],
+        }).sort_values("Premium", ascending=True)
+        fig = px.bar(
+            cat_data, x="Premium", y="Peril", orientation="h",
+            color="Premium",
+            color_continuous_scale=[[0, "rgba(191,90,242,0.3)"], [1, PURPLE]],
+        )
+        apply_layout(fig, height=350, title=dict(text="Cat Premium by Peril"))
+        fig.update_layout(showlegend=False, coloraxis_showscale=False, xaxis_tickprefix="$")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Pricing assumptions & sensitivity
+    divider()
+    section("Pricing Assumptions",
+            "How the premium estimate is built — and what would change it.")
+
+    st.markdown(f"""
+    <div style="
+        background: rgba(255,255,255,0.02);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 14px;
+        padding: 24px 28px;
+    ">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+            <div>
+                <div style="font-size: 0.7rem; font-weight: 600; color: rgba(255,255,255,0.3);
+                     text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px;">
+                    Rating Factors Applied</div>
+                <div style="font-size: 0.85rem; color: rgba(255,255,255,0.5); line-height: 2;">
+                    Coverage Limit: <span style="color: #f5f5f7; font-weight: 600;">{format_number(coverage_limit)}</span><br>
+                    Contents Insured: <span style="color: #f5f5f7; font-weight: 600;">{format_number(contents_value)}</span><br>
+                    Deductible Credit: <span style="color: #f5f5f7; font-weight: 600;">{ded_credit:.0%}</span> (from {deductible})<br>
+                    Construction Factor: <span style="color: #f5f5f7; font-weight: 600;">{ho_const_factor.get(construction, 1.0):.2f}x</span><br>
+                    Building Age Surcharge: <span style="color: #f5f5f7; font-weight: 600;">{nfip_age_surcharge:.2f}x</span><br>
+                    NFIP Zone Base Rate: <span style="color: #f5f5f7; font-weight: 600;">${nfip_rate:.2f} / $1K</span>
+                </div>
+            </div>
+            <div>
+                <div style="font-size: 0.7rem; font-weight: 600; color: rgba(255,255,255,0.3);
+                     text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px;">
+                    Carrier Load Assumptions</div>
+                <div style="font-size: 0.85rem; color: rgba(255,255,255,0.5); line-height: 2;">
+                    Expense Ratio: <span style="color: #f5f5f7; font-weight: 600;">{expense_ratio:.0%}</span> (commission, admin, taxes)<br>
+                    Profit & Contingency: <span style="color: #f5f5f7; font-weight: 600;">{profit_margin:.0%}</span><br>
+                    Reinsurance Load: <span style="color: #f5f5f7; font-weight: 600;">{reins_load:.1%}</span> (risk-adjusted)<br>
+                    Combined Ratio Target: <span style="color: #f5f5f7; font-weight: 600;">{(1 - profit_margin):.0%}</span><br>
+                    Cat EAL (pure loss): <span style="color: #f5f5f7; font-weight: 600;">{format_number(eal)}</span><br>
+                    Loss Rate: <span style="color: #f5f5f7; font-weight: 600;">{loss_rate*100:.3f}%</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Sensitivity table
+    st.markdown("")
+    section("Deductible Sensitivity",
+            "How the total annual premium changes with different deductible levels. "
+            "Higher deductibles reduce premium but increase out-of-pocket exposure at claim time.")
+
+    sensitivity_rows = []
+    for ded_label, ded_mult in deductible_factor.items():
+        adj_nfip = (coverage_limit / 1000) * nfip_rate * nfip_age_surcharge * nfip_stories_credit * ded_mult
+        adj_nfip = max(adj_nfip, 300)
+        adj_ho = (coverage_limit / 1000) * ho_base_rate * ho_const_factor.get(construction, 1.0) * ded_mult
+        adj_ho = max(adj_ho, 500)
+        adj_cont = (contents_value / 1000) * contents_rate * ded_mult if contents_value > 0 else 0
+        adj_total = adj_nfip + adj_ho + adj_cont
+        sensitivity_rows.append({
+            "Deductible": f"${ded_label:,}",
+            "Flood (NFIP)": f"${adj_nfip:,.0f}",
+            "Homeowner / Wind": f"${adj_ho:,.0f}",
+            "Contents": f"${adj_cont:,.0f}",
+            "Total Premium": f"${adj_total:,.0f}",
+            "Savings vs $1K Ded": f"{(1 - ded_mult) * 100:.0f}%",
+        })
+
+    sens_df = pd.DataFrame(sensitivity_rows)
+    st.dataframe(sens_df, use_container_width=True, hide_index=True)
+
+    st.markdown(f"""
+    <div style="
+        background: rgba(255,159,10,0.04);
+        border: 1px solid rgba(255,159,10,0.12);
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin-top: 20px;
+    ">
+        <div style="font-size: 0.8rem; color: rgba(255,255,255,0.5); line-height: 1.7;">
+            <strong style="color: {ORANGE};">Disclaimer:</strong> These estimates are for
+            illustrative purposes only. Actual premiums will vary based on carrier underwriting
+            guidelines, claims history, credit-based insurance score, exact location (latitude/longitude),
+            proximity to coast or fire perimeter, elevation certificate data, and local regulatory
+            rate filings. Flood insurance through the NFIP is priced using FEMA's Risk Rating 2.0
+            methodology which incorporates flood frequency, flood type, distance to water source,
+            and property-specific characteristics. Consult a licensed insurance professional for
+            binding quotes.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 # ══════════════════════════════════════════════
 # FEMA DISASTER DECLARATIONS
