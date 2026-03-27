@@ -1,3 +1,5 @@
+![Cat Model Dashboard](images/hero_banner.png)
+
 # Cat Model Dashboard
 
 **Catastrophe Modeling Analytics Platform** — An interactive multi-source dashboard for catastrophe risk analysis, combining US federal disaster data with global disaster intelligence.
